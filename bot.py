@@ -6,7 +6,7 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Union
+from typing import Dict, Optional, Tuple, Union
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -72,8 +72,8 @@ MENU_BUTTONS = {
     "↩️ Удалить последнюю",
 }
 
-pending_transactions: dict[int, dict[str, Union[int, str]]] = {}
-input_modes: dict[int, str] = {}
+pending_transactions: Dict[int, Dict[str, Union[int, str]]] = {}
+input_modes: Dict[int, str] = {}
 
 
 def db_connect() -> sqlite3.Connection:
@@ -110,7 +110,7 @@ def init_db() -> None:
         conn.commit()
 
 
-def parse_transaction(text: str) -> Optional[tuple[str, int]]:
+def parse_transaction(text: str) -> Optional[Tuple[str, int]]:
     match = re.fullmatch(r"\s*(.+?)\s+((?:\d[\d ]*)(?:[,.]\d{1,2})?)\s*", text)
     if not match:
         return None
