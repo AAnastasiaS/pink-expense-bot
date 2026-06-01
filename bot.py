@@ -14,11 +14,9 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
     LabeledPrice,
     Message,
     PreCheckoutQuery,
-    ReplyKeyboardMarkup,
 )
 
 
@@ -43,6 +41,7 @@ DB_PATH = Path(os.getenv("DB_PATH", "expenses.sqlite3"))
 PRO_PRICE_STARS = 1
 PRO_PAYLOAD_PREFIX = "pro_forever"
 BUY_PRO_CALLBACK = "buy_pro"
+MENU_CALLBACK_PREFIX = "menu:"
 
 EXPENSE_CATEGORIES = [
     ("food", "🍓 Еда"),
@@ -181,22 +180,38 @@ def parse_transaction(text: str) -> Optional[Tuple[str, int]]:
     return title, amount
 
 
-def main_keyboard(user_id: Optional[int] = None) -> ReplyKeyboardMarkup:
+def main_menu_keyboard(user_id: Optional[int] = None) -> InlineKeyboardMarkup:
     rows = [
-        [KeyboardButton(text="➖ Расход"), KeyboardButton(text="➕ Доход")],
-        [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="📊 Статистика")],
-        [KeyboardButton(text="🗂 Категории"), KeyboardButton(text="🧾 История")],
+        [
+            InlineKeyboardButton(text="➖ Расход", callback_data=f"{MENU_CALLBACK_PREFIX}expense"),
+            InlineKeyboardButton(text="➕ Доход", callback_data=f"{MENU_CALLBACK_PREFIX}income"),
+        ],
+        [
+            InlineKeyboardButton(text="💰 Баланс", callback_data=f"{MENU_CALLBACK_PREFIX}balance"),
+            InlineKeyboardButton(text="📊 Статистика", callback_data=f"{MENU_CALLBACK_PREFIX}stats"),
+        ],
+        [
+            InlineKeyboardButton(text="🗂 Категории", callback_data=f"{MENU_CALLBACK_PREFIX}categories"),
+            InlineKeyboardButton(text="🧾 История", callback_data=f"{MENU_CALLBACK_PREFIX}history"),
+        ],
     ]
-    last_row = [KeyboardButton(text="↩️ Удалить последнюю")]
+    last_row = [
+        InlineKeyboardButton(
+            text="↩️ Удалить последнюю",
+            callback_data=f"{MENU_CALLBACK_PREFIX}delete_last",
+        )
+    ]
     if user_id is not None and not user_is_pro(user_id):
-        last_row.insert(0, KeyboardButton(text="💎 Купить Pro"))
+        last_row.insert(
+            0,
+            InlineKeyboardButton(
+                text=f"💎 Купить Pro за {PRO_PRICE_STARS} ⭐",
+                callback_data=BUY_PRO_CALLBACK,
+            ),
+        )
     rows.append(last_row)
 
-    return ReplyKeyboardMarkup(
-        keyboard=rows,
-        resize_keyboard=True,
-        input_field_placeholder="Например: кофе 300",
-    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def category_keyboard(kind: str) -> InlineKeyboardMarkup:
@@ -205,22 +220,6 @@ def category_keyboard(kind: str) -> InlineKeyboardMarkup:
     for category_id, title in categories:
         rows.append([InlineKeyboardButton(text=title, callback_data=f"cat:{category_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def pro_inline_keyboard(user_id: int) -> Optional[InlineKeyboardMarkup]:
-    if user_is_pro(user_id):
-        return None
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"💎 Купить Pro за {PRO_PRICE_STARS} ⭐",
-                    callback_data=BUY_PRO_CALLBACK,
-                )
-            ]
-        ]
-    )
 
 
 def category_title(category_id: str) -> str:
@@ -408,34 +407,33 @@ async def start_handler(message: Message) -> None:
         "Привет, я твой розовый кошелек 🩷\n\n"
         "Быстро добавить расход: `кофе 300`, `такси 1000`.\n"
         "Доход можно так: `+ зарплата 50000`.\n\n"
-        "А еще можно пользоваться кнопками снизу.",
+        "А еще можно пользоваться кнопками под этим сообщением.",
         parse_mode="Markdown",
-        reply_markup=main_keyboard(message.from_user.id),
+        reply_markup=main_menu_keyboard(message.from_user.id),
     )
-    if not user_is_pro(message.from_user.id):
-        await message.answer(
-            "💎 Хочешь Pro навсегда?",
-            reply_markup=pro_inline_keyboard(message.from_user.id),
-        )
 
 
 async def stats_handler(message: Message) -> None:
     await message.answer(
         stats_text(message.from_user.id),
         parse_mode="Markdown",
-        reply_markup=main_keyboard(message.from_user.id),
+        reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
 
 async def balance_handler(message: Message) -> None:
     await message.answer(
         balance_text(message.from_user.id),
-        reply_markup=main_keyboard(message.from_user.id),
+        reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
 
 async def history_handler(message: Message) -> None:
-    await message.answer(history_text(message.from_user.id), parse_mode="Markdown")
+    await message.answer(
+        history_text(message.from_user.id),
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard(message.from_user.id),
+    )
 
 
 async def categories_handler(message: Message) -> None:
@@ -449,7 +447,7 @@ async def delete_last_handler(message: Message) -> None:
     result = delete_last_transaction(message.from_user.id)
     await message.answer(
         result or "Удалять пока нечего.",
-        reply_markup=main_keyboard(message.from_user.id),
+        reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
 
@@ -466,7 +464,7 @@ async def buy_pro_handler(message: Message) -> None:
     if user_is_pro(user_id):
         await message.answer(
             "💎 Pro уже включен навсегда.",
-            reply_markup=main_keyboard(user_id),
+            reply_markup=main_menu_keyboard(user_id),
         )
         return
 
@@ -515,7 +513,7 @@ async def successful_payment_handler(message: Message) -> None:
     await message.answer(
         "💎 Готово, Pro включен навсегда.\n\n"
         "Пока новых функций нет, но статус уже сохранен в базе.",
-        reply_markup=main_keyboard(message.from_user.id),
+        reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
 
@@ -549,7 +547,7 @@ async def expense_handler(message: Message) -> None:
             "Расход: `кофе 300`\n"
             "Доход: `+ зарплата 50000`",
             parse_mode="Markdown",
-            reply_markup=main_keyboard(user_id),
+            reply_markup=main_menu_keyboard(user_id),
         )
         return
 
@@ -562,6 +560,65 @@ async def expense_handler(message: Message) -> None:
         f"Записываем {action}: {title} — {money(amount)}\nВыбери категорию:",
         reply_markup=category_keyboard(kind),
     )
+
+
+async def main_menu_callback_handler(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    action = callback.data.removeprefix(MENU_CALLBACK_PREFIX)
+    await callback.answer()
+
+    if action == "expense":
+        input_modes[user_id] = "expense"
+        await callback.message.answer(
+            "➖ Напиши расход в формате `название сумма`.\nНапример: `кофе 300`",
+            parse_mode="Markdown",
+        )
+        return
+
+    if action == "income":
+        input_modes[user_id] = "income"
+        await callback.message.answer(
+            "➕ Напиши доход в формате `название сумма`.\nНапример: `зарплата 50000`",
+            parse_mode="Markdown",
+        )
+        return
+
+    if action == "balance":
+        await callback.message.answer(
+            balance_text(user_id),
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        return
+
+    if action == "stats":
+        await callback.message.answer(
+            stats_text(user_id),
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        return
+
+    if action == "categories":
+        await callback.message.answer(
+            "🗂 Выбери категорию расходов, покажу траты за месяц:",
+            reply_markup=categories_keyboard(),
+        )
+        return
+
+    if action == "history":
+        await callback.message.answer(
+            history_text(user_id),
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        return
+
+    if action == "delete_last":
+        result = delete_last_transaction(user_id)
+        await callback.message.answer(
+            result or "Удалять пока нечего.",
+            reply_markup=main_menu_keyboard(user_id),
+        )
 
 
 async def category_handler(callback: CallbackQuery) -> None:
@@ -627,6 +684,7 @@ async def main() -> None:
     dp.message.register(expense_handler, F.text)
     dp.pre_checkout_query.register(pre_checkout_handler)
     dp.callback_query.register(buy_pro_callback_handler, F.data == BUY_PRO_CALLBACK)
+    dp.callback_query.register(main_menu_callback_handler, F.data.startswith(MENU_CALLBACK_PREFIX))
     dp.callback_query.register(category_handler, F.data.startswith("cat:"))
     dp.callback_query.register(category_details_handler, F.data.startswith("showcat:"))
 
