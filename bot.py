@@ -42,6 +42,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = Path(os.getenv("DB_PATH", "expenses.sqlite3"))
 PRO_PRICE_STARS = 1
 PRO_PAYLOAD_PREFIX = "pro_forever"
+BUY_PRO_CALLBACK = "buy_pro"
 
 EXPENSE_CATEGORIES = [
     ("food", "🍓 Еда"),
@@ -204,6 +205,22 @@ def category_keyboard(kind: str) -> InlineKeyboardMarkup:
     for category_id, title in categories:
         rows.append([InlineKeyboardButton(text=title, callback_data=f"cat:{category_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def pro_inline_keyboard(user_id: int) -> Optional[InlineKeyboardMarkup]:
+    if user_is_pro(user_id):
+        return None
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"💎 Купить Pro за {PRO_PRICE_STARS} ⭐",
+                    callback_data=BUY_PRO_CALLBACK,
+                )
+            ]
+        ]
+    )
 
 
 def category_title(category_id: str) -> str:
@@ -395,6 +412,11 @@ async def start_handler(message: Message) -> None:
         parse_mode="Markdown",
         reply_markup=main_keyboard(message.from_user.id),
     )
+    if not user_is_pro(message.from_user.id):
+        await message.answer(
+            "💎 Хочешь Pro навсегда?",
+            reply_markup=pro_inline_keyboard(message.from_user.id),
+        )
 
 
 async def stats_handler(message: Message) -> None:
@@ -449,11 +471,29 @@ async def buy_pro_handler(message: Message) -> None:
         return
 
     await message.answer_invoice(
-        title="💎 Pro навсегда",
-        description="Доступ Pro для этого бота навсегда. Пока без новых функций, они появятся позже.",
-        payload=f"{PRO_PAYLOAD_PREFIX}:{user_id}",
-        currency="XTR",
-        prices=[LabeledPrice(label="Pro навсегда", amount=PRO_PRICE_STARS)],
+        **pro_invoice_kwargs(user_id),
+    )
+
+
+def pro_invoice_kwargs(user_id: int) -> Dict[str, object]:
+    return {
+        "title": "💎 Pro навсегда",
+        "description": "Доступ Pro для этого бота навсегда. Пока без новых функций, они появятся позже.",
+        "payload": f"{PRO_PAYLOAD_PREFIX}:{user_id}",
+        "currency": "XTR",
+        "prices": [LabeledPrice(label="Pro навсегда", amount=PRO_PRICE_STARS)],
+    }
+
+
+async def buy_pro_callback_handler(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    if user_is_pro(user_id):
+        await callback.answer("Pro уже включен навсегда.", show_alert=True)
+        return
+
+    await callback.answer()
+    await callback.message.answer_invoice(
+        **pro_invoice_kwargs(user_id),
     )
 
 
@@ -586,6 +626,7 @@ async def main() -> None:
     dp.message.register(delete_last_handler, F.text == "↩️ Удалить последнюю")
     dp.message.register(expense_handler, F.text)
     dp.pre_checkout_query.register(pre_checkout_handler)
+    dp.callback_query.register(buy_pro_callback_handler, F.data == BUY_PRO_CALLBACK)
     dp.callback_query.register(category_handler, F.data.startswith("cat:"))
     dp.callback_query.register(category_details_handler, F.data.startswith("showcat:"))
 
