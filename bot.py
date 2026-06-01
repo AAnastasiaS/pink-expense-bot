@@ -180,6 +180,12 @@ def parse_transaction(text: str) -> Optional[Tuple[str, int]]:
     return title, amount
 
 
+def strip_prefix(text: str, prefix: str) -> str:
+    if text.startswith(prefix):
+        return text[len(prefix):]
+    return text
+
+
 def main_menu_keyboard(user_id: Optional[int] = None) -> InlineKeyboardMarkup:
     rows = [
         [
@@ -201,7 +207,12 @@ def main_menu_keyboard(user_id: Optional[int] = None) -> InlineKeyboardMarkup:
             callback_data=f"{MENU_CALLBACK_PREFIX}delete_last",
         )
     ]
-    if user_id is not None and not user_is_pro(user_id):
+    if user_id is not None and user_is_pro(user_id):
+        last_row.insert(
+            0,
+            InlineKeyboardButton(text="💎 Pro", callback_data=f"{MENU_CALLBACK_PREFIX}pro"),
+        )
+    elif user_id is not None:
         last_row.insert(
             0,
             InlineKeyboardButton(
@@ -483,6 +494,20 @@ def pro_invoice_kwargs(user_id: int) -> Dict[str, object]:
     }
 
 
+def pro_menu_text() -> str:
+    return (
+        "💎 Pro-зона\n\n"
+        "У тебя включен Pro навсегда.\n\n"
+        "Сюда будем докручивать:\n"
+        "📤 Экспорт расходов в CSV и другие форматы\n"
+        "📅 Умные месячные отчеты\n"
+        "🎯 Лимиты и предупреждения по категориям\n"
+        "✨ Авто-категоризацию расходов\n"
+        "🔁 Регулярные платежи\n"
+        "🔮 Финансовые инсайты"
+    )
+
+
 async def buy_pro_callback_handler(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
     if user_is_pro(user_id):
@@ -564,7 +589,7 @@ async def expense_handler(message: Message) -> None:
 
 async def main_menu_callback_handler(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
-    action = callback.data.removeprefix(MENU_CALLBACK_PREFIX)
+    action = strip_prefix(callback.data, MENU_CALLBACK_PREFIX)
     await callback.answer()
 
     if action == "expense":
@@ -619,6 +644,19 @@ async def main_menu_callback_handler(callback: CallbackQuery) -> None:
             result or "Удалять пока нечего.",
             reply_markup=main_menu_keyboard(user_id),
         )
+        return
+
+    if action == "pro":
+        if not user_is_pro(user_id):
+            await callback.message.answer_invoice(
+                **pro_invoice_kwargs(user_id),
+            )
+            return
+
+        await callback.message.answer(
+            pro_menu_text(),
+            reply_markup=main_menu_keyboard(user_id),
+        )
 
 
 async def category_handler(callback: CallbackQuery) -> None:
@@ -629,7 +667,7 @@ async def category_handler(callback: CallbackQuery) -> None:
         await callback.answer("Эта операция уже не ожидает категорию", show_alert=True)
         return
 
-    category_id = callback.data.removeprefix("cat:")
+    category_id = strip_prefix(callback.data, "cat:")
     save_transaction(
         user_id,
         str(transaction["title"]),
@@ -648,7 +686,7 @@ async def category_handler(callback: CallbackQuery) -> None:
 
 
 async def category_details_handler(callback: CallbackQuery) -> None:
-    category_id = callback.data.removeprefix("showcat:")
+    category_id = strip_prefix(callback.data, "showcat:")
     await callback.message.edit_text(
         category_details_text(callback.from_user.id, category_id),
         reply_markup=categories_keyboard(),
