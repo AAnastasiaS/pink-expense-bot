@@ -124,6 +124,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 is_pro INTEGER NOT NULL DEFAULT 0,
+                autocat_enabled INTEGER NOT NULL DEFAULT 0,
                 pro_purchased_at TEXT,
                 telegram_payment_charge_id TEXT
             )
@@ -171,6 +172,10 @@ def init_db() -> None:
         column_names = {column["name"] for column in columns}
         if "kind" not in column_names:
             conn.execute("ALTER TABLE expenses ADD COLUMN kind TEXT NOT NULL DEFAULT 'expense'")
+        user_columns = conn.execute("PRAGMA table_info(users)").fetchall()
+        user_column_names = {column["name"] for column in user_columns}
+        if "autocat_enabled" not in user_column_names:
+            conn.execute("ALTER TABLE users ADD COLUMN autocat_enabled INTEGER NOT NULL DEFAULT 0")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_expenses_user_created
@@ -203,6 +208,32 @@ def user_is_pro(user_id: int) -> bool:
             (user_id,),
         ).fetchone()
     return bool(row["is_pro"]) if row else False
+
+
+def autocat_enabled(user_id: int) -> bool:
+    ensure_user(user_id)
+    with closing(db_connect()) as conn:
+        row = conn.execute(
+            "SELECT autocat_enabled FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    return bool(row["autocat_enabled"]) if row else False
+
+
+def set_autocat_enabled(user_id: int, enabled: bool) -> None:
+    ensure_user(user_id)
+    with closing(db_connect()) as conn:
+        conn.execute(
+            "UPDATE users SET autocat_enabled = ? WHERE user_id = ?",
+            (1 if enabled else 0, user_id),
+        )
+        conn.commit()
+
+
+def toggle_autocat(user_id: int) -> bool:
+    enabled = not autocat_enabled(user_id)
+    set_autocat_enabled(user_id, enabled)
+    return enabled
 
 
 def set_user_pro(user_id: int, telegram_payment_charge_id: str) -> None:
@@ -311,7 +342,8 @@ def main_menu_keyboard(user_id: Optional[int] = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def pro_menu_keyboard() -> InlineKeyboardMarkup:
+def pro_menu_keyboard(user_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    autocat_status = "вкл" if user_id is not None and autocat_enabled(user_id) else "выкл"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -323,7 +355,7 @@ def pro_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🔁 Регулярные", callback_data=f"{PRO_CALLBACK_PREFIX}recurring"),
             ],
             [
-                InlineKeyboardButton(text="✨ Авто-категории", callback_data=f"{PRO_CALLBACK_PREFIX}autocat"),
+                InlineKeyboardButton(text=f"✨ Авто-категории: {autocat_status}", callback_data=f"{PRO_CALLBACK_PREFIX}autocat"),
                 InlineKeyboardButton(text="🔮 Инсайт", callback_data=f"{PRO_CALLBACK_PREFIX}insight"),
             ],
             [InlineKeyboardButton(text="⬅️ Главное меню", callback_data=f"{PRO_CALLBACK_PREFIX}main")],
@@ -1059,7 +1091,7 @@ async def pro_callback_handler(callback: CallbackQuery) -> None:
 
     await callback.answer()
     if action == "menu":
-        await callback.message.answer(pro_menu_text(), reply_markup=pro_menu_keyboard())
+        await callback.message.answer(pro_menu_text(), reply_markup=pro_menu_keyboard(user_id))
         return
 
     if action == "export_csv":
@@ -1068,7 +1100,7 @@ async def pro_callback_handler(callback: CallbackQuery) -> None:
             await callback.message.answer_document(
                 FSInputFile(export_path, filename="expenses.csv"),
                 caption="📤 Экспорт расходов и доходов в CSV",
-                reply_markup=pro_menu_keyboard(),
+                reply_markup=pro_menu_keyboard(user_id),
             )
         finally:
             try:
@@ -1080,7 +1112,7 @@ async def pro_callback_handler(callback: CallbackQuery) -> None:
     if action == "report":
         await callback.message.answer(
             pro_monthly_report_text(user_id),
-            reply_markup=pro_menu_keyboard(),
+            reply_markup=pro_menu_keyboard(user_id),
         )
         return
 
@@ -1104,19 +1136,25 @@ async def pro_callback_handler(callback: CallbackQuery) -> None:
         return
 
     if action == "autocat":
-        await callback.message.answer(
-            "✨ Авто-категории включены.\n\n"
+        enabled = toggle_autocat(user_id)
+        status = "включены" if enabled else "выключены"
+        hint = (
             "Пиши расходы как обычно: `латте 350`, `такси 1000`, `маникюр 3000`.\n"
-            "Если я узнаю категорию, предложу сохранить в один тап.",
+            "Если я узнаю категорию, предложу сохранить в один тап."
+            if enabled
+            else "Теперь расходы снова будут идти через обычный выбор категории."
+        )
+        await callback.message.answer(
+            f"✨ Авто-категории {status}.\n\n{hint}",
             parse_mode="Markdown",
-            reply_markup=pro_menu_keyboard(),
+            reply_markup=pro_menu_keyboard(user_id),
         )
         return
 
     if action == "insight":
         await callback.message.answer(
             insight_text(user_id),
-            reply_markup=pro_menu_keyboard(),
+            reply_markup=pro_menu_keyboard(user_id),
         )
 
 
@@ -1193,7 +1231,7 @@ async def recurring_callback_handler(callback: CallbackQuery) -> None:
             "🔁 Готово, добавила регулярный платеж.\n\n"
             f"{category_title(category_id)}\n"
             f"{recurring['title']} — {money(int(recurring['amount']))} каждый месяц",
-            reply_markup=pro_menu_keyboard(),
+            reply_markup=pro_menu_keyboard(user_id),
         )
 
 
@@ -1346,7 +1384,11 @@ async def expense_handler(message: Message) -> None:
     title, amount = parsed
     pending_transactions[user_id] = {"title": title, "amount": amount, "kind": kind}
 
-    suggested_category = suggest_expense_category(title) if kind == "expense" and user_is_pro(user_id) else None
+    suggested_category = (
+        suggest_expense_category(title)
+        if kind == "expense" and user_is_pro(user_id) and autocat_enabled(user_id)
+        else None
+    )
     if suggested_category:
         await message.answer(
             f"✨ Похоже, это {category_title(suggested_category)}.\nСохранить так?",
@@ -1429,7 +1471,7 @@ async def main_menu_callback_handler(callback: CallbackQuery) -> None:
 
         await callback.message.answer(
             pro_menu_text(),
-            reply_markup=pro_menu_keyboard(),
+            reply_markup=pro_menu_keyboard(user_id),
         )
 
 
