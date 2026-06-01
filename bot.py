@@ -12,11 +12,12 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
-    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
+    LabeledPrice,
     Message,
+    PreCheckoutQuery,
     ReplyKeyboardMarkup,
 )
 
@@ -39,7 +40,8 @@ load_env_file()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = Path(os.getenv("DB_PATH", "expenses.sqlite3"))
-PINK_IMAGE_PATH = Path("assets/pink-wallet.png")
+PRO_PRICE_STARS = 1
+PRO_PAYLOAD_PREFIX = "pro_forever"
 
 EXPENSE_CATEGORIES = [
     ("food", "🍓 Еда"),
@@ -68,7 +70,7 @@ MENU_BUTTONS = {
     "📊 Статистика",
     "🗂 Категории",
     "🧾 История",
-    "🌸 Картинка",
+    "💎 Купить Pro",
     "↩️ Удалить последнюю",
 }
 
@@ -84,6 +86,16 @@ def db_connect() -> sqlite3.Connection:
 
 def init_db() -> None:
     with closing(db_connect()) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                is_pro INTEGER NOT NULL DEFAULT 0,
+                pro_purchased_at TEXT,
+                telegram_payment_charge_id TEXT
+            )
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS expenses (
@@ -110,6 +122,50 @@ def init_db() -> None:
         conn.commit()
 
 
+def ensure_user(user_id: int) -> None:
+    with closing(db_connect()) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
+            (user_id,),
+        )
+        conn.commit()
+
+
+def user_is_pro(user_id: int) -> bool:
+    ensure_user(user_id)
+    with closing(db_connect()) as conn:
+        row = conn.execute(
+            "SELECT is_pro FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    return bool(row["is_pro"]) if row else False
+
+
+def set_user_pro(user_id: int, telegram_payment_charge_id: str) -> None:
+    with closing(db_connect()) as conn:
+        conn.execute(
+            """
+            INSERT INTO users (
+                user_id,
+                is_pro,
+                pro_purchased_at,
+                telegram_payment_charge_id
+            )
+            VALUES (?, 1, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                is_pro = 1,
+                pro_purchased_at = excluded.pro_purchased_at,
+                telegram_payment_charge_id = excluded.telegram_payment_charge_id
+            """,
+            (
+                user_id,
+                datetime.now().isoformat(timespec="seconds"),
+                telegram_payment_charge_id,
+            ),
+        )
+        conn.commit()
+
+
 def parse_transaction(text: str) -> Optional[Tuple[str, int]]:
     match = re.fullmatch(r"\s*(.+?)\s+((?:\d[\d ]*)(?:[,.]\d{1,2})?)\s*", text)
     if not match:
@@ -124,14 +180,19 @@ def parse_transaction(text: str) -> Optional[Tuple[str, int]]:
     return title, amount
 
 
-def main_keyboard() -> ReplyKeyboardMarkup:
+def main_keyboard(user_id: Optional[int] = None) -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton(text="➖ Расход"), KeyboardButton(text="➕ Доход")],
+        [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="📊 Статистика")],
+        [KeyboardButton(text="🗂 Категории"), KeyboardButton(text="🧾 История")],
+    ]
+    last_row = [KeyboardButton(text="↩️ Удалить последнюю")]
+    if user_id is not None and not user_is_pro(user_id):
+        last_row.insert(0, KeyboardButton(text="💎 Купить Pro"))
+    rows.append(last_row)
+
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="➖ Расход"), KeyboardButton(text="➕ Доход")],
-            [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="📊 Статистика")],
-            [KeyboardButton(text="🗂 Категории"), KeyboardButton(text="🧾 История")],
-            [KeyboardButton(text="🌸 Картинка"), KeyboardButton(text="↩️ Удалить последнюю")],
-        ],
+        keyboard=rows,
         resize_keyboard=True,
         input_field_placeholder="Например: кофе 300",
     )
@@ -324,35 +385,31 @@ def delete_last_transaction(user_id: int) -> Optional[str]:
     return f"Удалила последний {sign}: {row['title']} · {money(row['amount'])}"
 
 
-async def answer_with_pink_image(message: Message, caption: str) -> None:
-    if PINK_IMAGE_PATH.exists():
-        await message.answer_photo(
-            FSInputFile(PINK_IMAGE_PATH),
-            caption=caption,
-            parse_mode="Markdown",
-            reply_markup=main_keyboard(),
-        )
-        return
-
-    await message.answer(caption, parse_mode="Markdown", reply_markup=main_keyboard())
-
-
 async def start_handler(message: Message) -> None:
-    await answer_with_pink_image(
-        message,
+    ensure_user(message.from_user.id)
+    await message.answer(
         "Привет, я твой розовый кошелек 🩷\n\n"
         "Быстро добавить расход: `кофе 300`, `такси 1000`.\n"
         "Доход можно так: `+ зарплата 50000`.\n\n"
         "А еще можно пользоваться кнопками снизу.",
+        parse_mode="Markdown",
+        reply_markup=main_keyboard(message.from_user.id),
     )
 
 
 async def stats_handler(message: Message) -> None:
-    await answer_with_pink_image(message, stats_text(message.from_user.id))
+    await message.answer(
+        stats_text(message.from_user.id),
+        parse_mode="Markdown",
+        reply_markup=main_keyboard(message.from_user.id),
+    )
 
 
 async def balance_handler(message: Message) -> None:
-    await answer_with_pink_image(message, balance_text(message.from_user.id))
+    await message.answer(
+        balance_text(message.from_user.id),
+        reply_markup=main_keyboard(message.from_user.id),
+    )
 
 
 async def history_handler(message: Message) -> None:
@@ -366,17 +423,12 @@ async def categories_handler(message: Message) -> None:
     )
 
 
-async def image_handler(message: Message) -> None:
-    await answer_with_pink_image(
-        message,
-        "🌸 Немного розового финансового настроения.\n\n"
-        "Пиши расход или доход, а я все аккуратно сохраню.",
-    )
-
-
 async def delete_last_handler(message: Message) -> None:
     result = delete_last_transaction(message.from_user.id)
-    await message.answer(result or "Удалять пока нечего.", reply_markup=main_keyboard())
+    await message.answer(
+        result or "Удалять пока нечего.",
+        reply_markup=main_keyboard(message.from_user.id),
+    )
 
 
 async def add_expense_button_handler(message: Message) -> None:
@@ -384,6 +436,46 @@ async def add_expense_button_handler(message: Message) -> None:
     await message.answer(
         "➖ Напиши расход в формате `название сумма`.\nНапример: `кофе 300`",
         parse_mode="Markdown",
+    )
+
+
+async def buy_pro_handler(message: Message) -> None:
+    user_id = message.from_user.id
+    if user_is_pro(user_id):
+        await message.answer(
+            "💎 Pro уже включен навсегда.",
+            reply_markup=main_keyboard(user_id),
+        )
+        return
+
+    await message.answer_invoice(
+        title="💎 Pro навсегда",
+        description="Доступ Pro для этого бота навсегда. Пока без новых функций, они появятся позже.",
+        payload=f"{PRO_PAYLOAD_PREFIX}:{user_id}",
+        currency="XTR",
+        prices=[LabeledPrice(label="Pro навсегда", amount=PRO_PRICE_STARS)],
+    )
+
+
+async def pre_checkout_handler(query: PreCheckoutQuery) -> None:
+    expected_payload = f"{PRO_PAYLOAD_PREFIX}:{query.from_user.id}"
+    if query.invoice_payload != expected_payload:
+        await query.answer(ok=False, error_message="Этот инвойс не подходит для твоего аккаунта.")
+        return
+
+    await query.answer(ok=True)
+
+
+async def successful_payment_handler(message: Message) -> None:
+    payment = message.successful_payment
+    if payment.currency != "XTR" or not payment.invoice_payload.startswith(PRO_PAYLOAD_PREFIX):
+        return
+
+    set_user_pro(message.from_user.id, payment.telegram_payment_charge_id)
+    await message.answer(
+        "💎 Готово, Pro включен навсегда.\n\n"
+        "Пока новых функций нет, но статус уже сохранен в базе.",
+        reply_markup=main_keyboard(message.from_user.id),
     )
 
 
@@ -417,7 +509,7 @@ async def expense_handler(message: Message) -> None:
             "Расход: `кофе 300`\n"
             "Доход: `+ зарплата 50000`",
             parse_mode="Markdown",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(user_id),
         )
         return
 
@@ -482,16 +574,18 @@ async def main() -> None:
     dp.message.register(balance_handler, Command("balance"))
     dp.message.register(history_handler, Command("history"))
     dp.message.register(categories_handler, Command("categories"))
-    dp.message.register(image_handler, Command("image"))
+    dp.message.register(buy_pro_handler, Command("pro"))
+    dp.message.register(successful_payment_handler, F.successful_payment)
     dp.message.register(add_expense_button_handler, F.text == "➖ Расход")
     dp.message.register(add_income_button_handler, F.text == "➕ Доход")
     dp.message.register(balance_handler, F.text == "💰 Баланс")
     dp.message.register(stats_handler, F.text == "📊 Статистика")
     dp.message.register(categories_handler, F.text == "🗂 Категории")
     dp.message.register(history_handler, F.text == "🧾 История")
-    dp.message.register(image_handler, F.text == "🌸 Картинка")
+    dp.message.register(buy_pro_handler, F.text == "💎 Купить Pro")
     dp.message.register(delete_last_handler, F.text == "↩️ Удалить последнюю")
     dp.message.register(expense_handler, F.text)
+    dp.pre_checkout_query.register(pre_checkout_handler)
     dp.callback_query.register(category_handler, F.data.startswith("cat:"))
     dp.callback_query.register(category_details_handler, F.data.startswith("showcat:"))
 
